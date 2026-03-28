@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>撞球進球角度教學模擬器</title>
+    <!-- 引入 Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { 
+            background-color: #0f172a; /* Tailwind slate-900 */
+            color: white; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            min-height: 100vh; 
+            margin: 0; 
+            font-family: 'Inter', system-ui, sans-serif; 
+        }
+        canvas { 
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); 
+            border-radius: 12px; 
+            cursor: crosshair; 
+        }
+        .controls { 
+            margin-top: 2rem; 
+            display: flex; 
+            gap: 1rem; 
+        }
+    </style>
+</head>
+<body>
+    <div class="text-center mb-6 px-4">
+        <h1 class="text-4xl font-extrabold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-blue-500">
+            撞球進球角度教學模擬器
+        </h1>
+        <p class="text-slate-400 text-lg">
+            滑鼠移動瞄準（與母球距離決定力道大小），<strong class="text-white">點擊滑鼠左鍵</strong>即可擊球。<br>
+            觀察 <span class="text-white font-bold tracking-wider inline-flex items-center gap-1"><span class="w-3 h-3 rounded-full border border-dashed border-white inline-block"></span>假想球 (Ghost Ball)</span> 的位置與 <span class="text-cyan-400 font-bold">90度分離角</span>。
+        </p>
+    </div>
+
+    <!-- 視覺模擬區 -->
+    <div class="relative">
+        <canvas id="poolTable" width="900" height="450"></canvas>
+    </div>
+
+    <!-- 控制面板 -->
+    <div class="controls">
+        <button id="btnReset" class="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg shadow-md transition-colors duration-200">
+            重置球位 (Reset)
+        </button>
+        <button id="btnRandom" class="px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white font-semibold rounded-lg shadow-md transition-colors duration-200">
+            隨機球位 (Random)
+        </button>
+    </div>
+
+    <script>
+        // --- Vector Math Class (2D 向量運算) ---
+        class Vector {
+            constructor(x, y) { this.x = x; this.y = y; }
+            add(v) { return new Vector(this.x + v.x, this.y + v.y); }
+            sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
+            mult(n) { return new Vector(this.x * n, this.y * n); }
+            mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+            normalize() { let m = this.mag(); return m === 0 ? new Vector(0,0) : new Vector(this.x/m, this.y/m); }
+            dot(v) { return this.x * v.x + this.y * v.y; }
+            dist(v) { return this.sub(v).mag(); }
+            copy() { return new Vector(this.x, this.y); }
+        }
+
+        // --- 取出 Canvas 元素並設定遊戲參數 ---
+        const canvas = document.getElementById('poolTable');
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width;
+        const H = canvas.height;
+        
+        // 桌面設定
+        const cushion = 35; // 顆星(cushion)的厚度
+        const pocketRadius = 24; // 袋口半徑
+        const FRICTION = 0.988; // 摩擦係數(速度衰減)
+        const BALL_RADIUS = 14; // 球體半徑
+        
+        // 定義 6 個袋口中心點位置：左上, 中上, 右上, 左下, 中下, 右下
+        const pockets = [
+            new Vector(cushion, cushion),
+            new Vector(W/2, cushion - 5),
+            new Vector(W - cushion, cushion),
+            new Vector(cushion, H - cushion),
+            new Vector(W/2, H - cushion + 5),
+            new Vector(W - cushion, H - cushion)
+        ];
+
+        // --- 球體類別 ---
+        class Ball {
+            constructor(x, y, color, isCue = false) {
+                this.pos = new Vector(x, y);
+                this.vel = new Vector(0, 0);
+                this.color = color;
+                this.isCue = isCue;
+                this.active = true;
+            }
+            update() {
+                if(!this.active) return;
+                
+                // 動力學更新與摩擦力
+                this.pos = this.pos.add(this.vel);
+                this.vel = this.vel.mult(FRICTION);
+                if (this.vel.mag() < 0.05) this.vel = new Vector(0, 0); // 低於閾值直接停止
+
+                // 顆星邊界反彈
+                if (this.pos.x - BALL_RADIUS < cushion) { this.pos.x = cushion + BALL_RADIUS; this.vel.x *= -1; }
+                if (this.pos.x + BALL_RADIUS > W - cushion) { this.pos.x = W - cushion - BALL_RADIUS; this.vel.x *= -1; }
+                if (this.pos.y - BALL_RADIUS < cushion) { this.pos.y = cushion + BALL_RADIUS; this.vel.y *= -1; }
+                if (this.pos.y + BALL_RADIUS > H - cushion) { this.pos.y = H - cushion - BALL_RADIUS; this.vel.y *= -1; }
+
+                // 檢查是否進袋 (跌落口袋)
+                for(let p of pockets) {
+                    if (this.pos.dist(p) < pocketRadius * 1.5) { 
+                        this.active = false;
+                        this.vel = new Vector(0,0);
+                        if(this.isCue) { // 如果是母球進袋 (Scratch)
+                            setTimeout(() => { if(!objBall.active) resetState(); else randomizeState(true); }, 800);
+                        }
+                    }
+                }
+            }
+            draw() {
+                if(!this.active) return;
+                ctx.save();
+                
+                // 陰影
+                ctx.shadowColor = 'rgba(0,0,0,0.5)';
+                ctx.shadowBlur = 6;
+                ctx.shadowOffsetX = 3;
+                ctx.shadowOffsetY = 3;
+
+                ctx.beginPath();
+                ctx.arc(this.pos.x, this.pos.y, BALL_RADIUS, 0, Math.PI * 2);
+
+                // 立體光影漸層 (Radial Gradient)
+                let grad = ctx.createRadialGradient(
+                    this.pos.x - 5, this.pos.y - 5, 2, 
+                    this.pos.x, this.pos.y, BALL_RADIUS * 1.2
+                );
+                grad.addColorStop(0, '#ffffff'); // 高光點
+                grad.addColorStop(0.3, this.color); // 原本顏色
+                if(this.isCue) grad.addColorStop(1, '#cccccc'); // 白球邊緣暗部
+                else grad.addColorStop(1, '#000000'); // 黑帶邊緣暗部
+                
+                ctx.fillStyle = grad;
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        let cueBall, objBall;
+        let aiming = true;
+        const MAX_POWER = 30;
+        let mousePos = new Vector(W/2, H/2);
+
+        // 初始化/重置狀態
+        function resetState() {
+            cueBall = new Ball(250, H/2, '#ffffff', true);
+            objBall = new Ball(W - 250, H/2, '#f43f5e'); // Tailwind rose-500
+            aiming = true;
+        }
+
+        function randomizeState(onlyCue = false) {
+            if(!onlyCue) {
+                objBall = new Ball(
+                    W/2 + 50 + Math.random()*(W/2 - cushion*2 - 100), 
+                    cushion + 50 + Math.random()*(H - cushion*2 - 100), 
+                    '#f43f5e'
+                );
+            }
+            cueBall = new Ball(
+                cushion + 50 + Math.random()*(W/2 - cushion*2 - 50), 
+                cushion + 50 + Math.random()*(H - cushion*2 - 100), 
+                '#ffffff', true
+            );
+            aiming = true;
+        }
+
+        resetState();
+
+        // --- 物理引擎核心：處理兩顆球的彈性碰撞 ---
+        function resolveCollision(b1, b2) {
+            if(!b1.active || !b2.active) return;
+            let n = b1.pos.sub(b2.pos);
+            let dist = n.mag();
+            
+            if (dist < BALL_RADIUS * 2) {
+                // 1. 位置分離，避免連續重疊 Bug
+                let overlap = BALL_RADIUS * 2 - dist;
+                let normal = n.normalize();
+                b1.pos = b1.pos.add(normal.mult(overlap / 2));
+                b2.pos = b2.pos.sub(normal.mult(overlap / 2));
+
+                // 2. 一維動量守恆與能量守恆計算 (質量皆為 1，完全彈性碰撞)
+                let relVel = b1.vel.sub(b2.vel);
+                let speed = relVel.dot(normal); // 在投影法線上的速度
+                
+                // 如果球正在分開則不處理
+                if (speed > 0) return; 
+
+                // 互換碰撞法向量上的速度長度 (Impulse)
+                let impulse = -1 * speed; // 因為兩者質量相同，公式簡化
+                let impulseVec = normal.mult(impulse);
+                b1.vel = b1.vel.add(impulseVec);
+                b2.vel = b2.vel.sub(impulseVec);
+            }
+        }
+
+        // --- 幾何計算核心：找出假想球 (Ghost Ball) 的碰撞點 ---
+        // 數學原理：射線 P(t) = O + t*D 與圓心 C, 半徑 R 的圓交點
+        function getGhostBallPos(cuePos, dir, objPos, radius) {
+            let v = cuePos.sub(objPos);
+            let b = 2 * v.dot(dir);
+            // 注意這裡的偵測半徑為 2*R，因為當母球邊緣碰觸到子球邊緣時，兩圓心距離為 2*R
+            let c = v.dot(v) - Math.pow(radius * 2, 2); 
+            let discriminant = b*b - 4*c;
+            
+            if (discriminant >= 0) {
+                // 求最小的正數根 t，即射線前方的第一個碰撞點
+                let t1 = (-b - Math.sqrt(discriminant)) / 2;
+                let t2 = (-b + Math.sqrt(discriminant)) / 2;
+                
+                if (t1 > 0) return cuePos.add(dir.mult(t1));
+                if (t2 > 0) return cuePos.add(dir.mult(t2));
+            }
+            return null;
+        }
+
+        // --- 繪製函式群 ---
+        function drawTable() {
+            // 最外層深色木框
+            ctx.fillStyle = '#1e293b'; 
+            ctx.fillRect(0, 0, W, H);
+            
+            // 包含綠色檯布與顆星
+            ctx.fillStyle = '#0f5132'; // 深綠色顆星
+            ctx.fillRect(10, 10, W-20, H-20);
+            
+            ctx.fillStyle = '#198754'; // 亮色綠檯布
+            ctx.fillRect(cushion, cushion, W-cushion*2, H-cushion*2);
+
+            // 繪製 6 個袋口
+            ctx.fillStyle = '#000000';
+            for (let i = 0; i < pockets.length; i++) {
+                ctx.beginPath();
+                ctx.arc(pockets[i].x, pockets[i].y, pocketRadius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function drawAiming() {
+            if (!aiming || !cueBall.active) return;
+            
+            let aimDir = mousePos.sub(cueBall.pos).normalize();
+            if (aimDir.mag() === 0) return;
+
+            // 1. 繪製初步瞄準線 (白色半透明)
+            ctx.beginPath();
+            ctx.moveTo(cueBall.pos.x, cueBall.pos.y);
+            ctx.lineTo(cueBall.pos.x + aimDir.x * 2000, cueBall.pos.y + aimDir.y * 2000);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.setLineDash([8, 8]);
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // 嘗試偵測交點 (假想球)
+            if (objBall.active) {
+                let ghostPos = getGhostBallPos(cueBall.pos, aimDir, objBall.pos, BALL_RADIUS);
+                
+                // 當母球射線確實會撞到子球時
+                if (ghostPos) {
+                    // 2. 畫出假想球 (Ghost Ball)
+                    ctx.beginPath();
+                    ctx.arc(ghostPos.x, ghostPos.y, BALL_RADIUS, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+                    ctx.fill();
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.setLineDash([4, 4]);
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+
+                    // 3. 子球預測進球路徑 (黃色)
+                    // 方向為：假想球圓心 往 子球圓心
+                    let objPathDir = objBall.pos.sub(ghostPos).normalize();
+                    ctx.beginPath();
+                    ctx.moveTo(objBall.pos.x, objBall.pos.y);
+                    ctx.lineTo(objBall.pos.x + objPathDir.x * 1500, objBall.pos.y + objPathDir.y * 1500);
+                    ctx.strokeStyle = '#fbbf24'; // Tailwind amber-400
+                    ctx.setLineDash([6, 6]);
+                    ctx.lineWidth = 2.5;
+                    ctx.stroke();
+
+                    // 4. 母球分離角切線預測 (cyan 漸層)
+                    // 計算方法：剔除瞄準方向在法向量(子球前進方向)上的分量，留下純切線分量
+                    let vCueInitial = aimDir;
+                    let vn = objPathDir.mult(vCueInitial.dot(objPathDir));
+                    let vCueFinal = vCueInitial.sub(vn); 
+                    
+                    // 若母球不是 100% 正面撞擊 (厚球)，就會有分離方向
+                    if (vCueFinal.mag() > 0.001) {
+                        let cuePathDir = vCueFinal.normalize();
+                        ctx.beginPath();
+                        ctx.moveTo(ghostPos.x, ghostPos.y);
+                        // 母球分離通常較短，故繪製較短的預測線
+                        ctx.lineTo(ghostPos.x + cuePathDir.x * 200, ghostPos.y + cuePathDir.y * 200);
+                        ctx.strokeStyle = '#22d3ee'; // Tailwind cyan-400
+                        ctx.setLineDash([6, 6]);
+                        ctx.lineWidth = 2.5;
+                        ctx.stroke();
+                        
+                        // 畫文字標籤
+                        ctx.fillStyle = '#fbbf24';
+                        ctx.font = "bold 13px sans-serif";
+                        ctx.fillText("進球可能路徑", objBall.pos.x + objPathDir.x * 120, objBall.pos.y + objPathDir.y * 120 + 20);
+                        
+                        ctx.fillStyle = '#22d3ee';
+                        ctx.fillText("90° 母球分離角", ghostPos.x + cuePathDir.x * 100, ghostPos.y + cuePathDir.y * 100 + 20);
+                    }
+                }
+            }
+            ctx.setLineDash([]); // 重置線條樣式
+
+            // 5. 繪製球桿 (Cue Stick) 與蓄力條
+            let dist = mousePos.dist(cueBall.pos);
+            let displayPower = Math.min(dist / 10, MAX_POWER); // 使用滑鼠與母球距離計算力道
+
+            let stickOffset = BALL_RADIUS + 5 + displayPower * 3; 
+            
+            let stickStart = cueBall.pos.sub(aimDir.mult(stickOffset));
+            // 球桿長度約 250
+            let stickEnd = cueBall.pos.sub(aimDir.mult(stickOffset + 250));
+
+            ctx.beginPath();
+            ctx.moveTo(stickStart.x, stickStart.y);
+            ctx.lineTo(stickEnd.x, stickEnd.y);
+            ctx.strokeStyle = '#8b5a2b'; // 原木色
+            ctx.lineWidth = 6;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            // 繪製球桿前段 (白色的 Stick Tip)
+            let tipEnd = cueBall.pos.sub(aimDir.mult(stickOffset + 12));
+            ctx.beginPath();
+            ctx.moveTo(stickStart.x, stickStart.y);
+            ctx.lineTo(tipEnd.x, tipEnd.y);
+            ctx.strokeStyle = '#f8fafc';
+            ctx.lineWidth = 6;
+            ctx.stroke();
+
+            // 蓄力條顯示 (在母球上方)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+            ctx.fillRect(cueBall.pos.x - 25, cueBall.pos.y - 35, 50, 6);
+            let powerRatio = displayPower / MAX_POWER;
+            ctx.fillStyle = powerRatio > 0.8 ? '#ef4444' : (powerRatio > 0.4 ? '#eab308' : '#22c55e');
+            ctx.fillRect(cueBall.pos.x - 25, cueBall.pos.y - 35, 50 * powerRatio, 6);
+        }
+
+        // --- 主迴圈 ---
+        function loop() {
+            // physics update
+            cueBall.update();
+            objBall.update();
+            resolveCollision(cueBall, objBall);
+
+            // 狀態機切換判斷 (當所有球靜止時，回到瞄準狀態)
+            if (!aiming) {
+                if (cueBall.vel.mag() === 0 && objBall.vel.mag() === 0) {
+                    aiming = true;
+                    // 如果球都不在場上了，就重置
+                    if(!numActiveBalls()) {
+                        resetState();
+                    }
+                }
+            }
+
+            // render
+            ctx.clearRect(0, 0, W, H);
+            drawTable();
+            if(aiming) drawAiming(); // 瞄準輔助線要在球的下方繪製，以免擋住球體
+            
+            // 讓子球先畫，母球後畫
+            objBall.draw();
+            cueBall.draw();
+
+            requestAnimationFrame(loop);
+        }
+
+        function numActiveBalls() {
+            return (cueBall.active ? 1 : 0) + (objBall.active ? 1 : 0);
+        }
+
+        // 啟動迴圈
+        requestAnimationFrame(loop);
+
+        // --- 事件監聽 (滑鼠互動) ---
+        function getMouseVector(e) {
+            let rect = canvas.getBoundingClientRect();
+            return new Vector(
+                (e.clientX - rect.left) * (canvas.width / rect.width),
+                (e.clientY - rect.top) * (canvas.height / rect.height)
+            );
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            mousePos = getMouseVector(e);
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (aiming && cueBall.active) {
+                let aimDir = mousePos.sub(cueBall.pos).normalize();
+                let dist = mousePos.dist(cueBall.pos);
+                let shootPower = Math.min(dist / 10, MAX_POWER);
+                shootPower = Math.max(shootPower, 1); // 確保至少有微小力度
+                
+                cueBall.vel = aimDir.mult(shootPower);
+                aiming = false;
+            } else if (!cueBall.active || !objBall.active) {
+                // 若點擊時場上有球不見，重新擺放
+                if(!objBall.active) resetState();
+                else randomizeState(true);
+            }
+        });
+
+        document.getElementById('btnReset').addEventListener('click', resetState);
+        document.getElementById('btnRandom').addEventListener('click', () => randomizeState(false));
+    </script>
+</body>
+</html>
